@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__b409fbd8-3593-42aa-beab-e599886ffecf__notion-search",
+      "mcp__b409fbd8-3593-42aa-beab-e599886ffecf__notion-fetch",
+      "mcp__b409fbd8-3593-42aa-beab-e599886ffecf__notion-create-pages"
+    ]
+  }
+}
