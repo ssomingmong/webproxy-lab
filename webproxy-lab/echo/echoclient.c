@@ -77,12 +77,6 @@ int main(int argc, char **argv) {
         Fputs(buf, stdout);
     }
 
-    // Close: 소켓 fd 반납 + 서버에 FIN 패킷 전송
-    // 안 닫으면 fd가 계속 쌓여서 fd leak 발생 (프로세스당 최대 1024개)
-    // 서버는 이 FIN을 받고 Rio_readlineb가 0 반환 → 서버 루프 종료
     Close(clientfd);
-
-    // 프로그램 정상 종료 (0 = 정상, 1 = 에러)
-    // main 끝나면 자동 종료되지만 명시적으로 표현
     exit(0);
 }
