@@ -44,3 +44,91 @@ int main(int argc, char **argv)
     Close(connfd); // line:netp:tiny:close
   }
 }
+
+void doit(int fd) {
+  int is_static;          // parse_uri() 반환값
+                          // 1 = 정적 콘텐츠 (파일 그대로 전송)
+                          // 0 = 동적 콘텐츠 (CGI 프로그램 실행)
+  struct stat sbuf;       // stat() 시스템콜이 채워주는 파일 정보 구조체
+                          // sbuf.st_size = 파일 크기 (bytes)
+                          // sbuf.st_mode = 파일 타입 + 권한 비트
+  char buf[MAXLINE];      // 네트워크에서 읽은 요청 라인을 저장하는 버퍼
+  char method[MAXLINE];   // 요청 라인의 첫 번째 토큰: "GET", "POST" 등
+  char uri[MAXLINE];      // 요청 라인의 두 번째 토큰: "/index.html", "/cgi-bin/adder?1&2"
+  char version[MAXLINE];  // 요청 라인의 세 번째 토큰: "HTTP/1.0", "HTTP/1.1"
+  char filename[MAXLINE]; // parse_uri()가 채워주는 실제 파일 경로
+                          // "/index.html" → "./index.html"
+  char cgiargs[MAXLINE];  // parse_uri()가 채워주는 CGI 인자
+                          // "/cgi-bin/adder?15000&213" → "15000&213"
+                          // 정적 콘텐츠면 빈 문자열 ""
+  rio_t rio;              // RIO 버퍼 구조체
+                          // fd에서 데이터를 읽을 때 내부 버퍼(8192byte)로 사용
+
+  // fd를 rio와 연결 + 내부 버퍼 초기화
+  // 이 호출 이후부터 Rio_readlineb로 fd에서 읽기 가능
+  Rio_readinitb(&rio, fd);
+
+  // 요청의 첫 번째 줄(요청 라인)을 buf에 저장
+  // 예: "GET /index.html HTTP/1.0\r\n"
+  Rio_readlineb(&rio, buf, MAXLINE);
+  printf("Request headers:\n");
+  printf("%s", buf);
+
+  // sscanf: buf에서 공백 기준으로 세 개의 토큰을 추출
+  // "GET /index.html HTTP/1.0\r\n"
+  //  ↓           ↓          ↓
+  // method      uri       version
+  sscanf(buf, "%s %s %s", method, uri, version);
+
+  // Tiny는 GET 메서드만 지원
+  // strcasecmp: 대소문자 구분 없이 문자열 비교
+  //   반환값 0   = 두 문자열이 같음 (GET 맞음)
+  //   반환값 비0 = 두 문자열이 다름 (GET 아님) → 501 에러 후 함수 종료
+  if(strcasecmp(method, "GET")) {
+    clienterror(fd, method, "501", "Not Implemented", "Tiny does not implement this metdhod");
+    return;
+  }
+
+  // 요청 라인 다음에 오는 헤더들을 읽고 버림
+  // 예: "Host: localhost:8080\r\n", "User-Agent: ...\r\n", "\r\n"(빈 줄=헤더 끝)
+  // Tiny는 헤더 내용을 사용하지 않지만
+  // 읽지 않으면 소켓 버퍼에 남아서 이후 통신에 문제가 생김
+  read_requesthdrs(&rio);
+
+  // URI를 파싱해서 filename과 cgiargs를 채워줌
+  // 정적: uri="/index.html"          → filename="./index.html", cgiargs="",         반환값=1
+  // 동적: uri="/cgi-bin/adder?1&2"   → filename="./cgi-bin/adder", cgiargs="1&2",  반환값=0
+  is_static = parse_uri(uri, filename, cgiargs);
+
+  // stat(): filename에 해당하는 파일 정보를 sbuf에 저장
+  // 반환값 < 0: 파일이 존재하지 않음 → 404 에러 후 함수 종료
+  if(stat(filename, &sbuf) < 0) {
+    clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file");
+    return;
+  }
+
+  if(is_static) {
+    // S_ISREG(sbuf.st_mode): 일반 파일인지 확인 (디렉토리, 소켓 등이면 false)
+    // S_IRUSR & sbuf.st_mode: 소유자 읽기 권한이 있는지 확인
+    // 둘 중 하나라도 만족 못하면 → 403 에러 후 함수 종료
+    if(!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
+      clienterror(fd, filename, "403", "Forbiddn", "Tiny couldn't read the file");
+      return;
+    }
+    // sbuf.st_size: 파일 크기(bytes)를 serve_static에 넘겨줌
+    // Content-Length 헤더 값으로 사용됨
+    serve_static(fd, filename, sbuf.st_size);
+  }
+  else {
+    // S_ISREG(sbuf.st_mode): 일반 파일인지 확인
+    // S_IXUSR & sbuf.st_mode: 소유자 실행 권한이 있는지 확인
+    // 둘 중 하나라도 만족 못하면 → 403 에러 후 함수 종료
+    if(!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
+      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't run the CGI program");
+      return;
+    }
+    serve_dynamic(fd, filename, cgiargs);
+  }
+}
+
+
