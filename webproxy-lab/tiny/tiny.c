@@ -500,3 +500,89 @@ void get_filetype(char *filename, char *filetype)
         strcpy(filetype, "text/plain");
 }
 
+/*
+ * serve_dynamic - CGI 프로그램을 자식 프로세스로 실행하고
+ *                 그 출력을 클라이언트에게 전송하는 함수
+ *
+ * 매개변수:
+ *   fd       : 클라이언트와 연결된 소켓 fd
+ *   filename : 실행할 CGI 프로그램 경로 (예: "./cgi-bin/adder")
+ *   cgiargs  : CGI 프로그램에 넘길 인자 (예: "15000&213")
+ *
+ * 동작 4단계:
+ *   [1단계] 부모가 성공 상태 라인 + Server 헤더 전송
+ *   [2단계] fork()로 자식 프로세스 생성
+ *   [3단계] 자식: QUERY_STRING 설정 → stdout을 fd로 교체 → CGI 실행
+ *   [4단계] 부모: 자식이 끝날 때까지 대기
+ *
+ * 핵심 아이디어:
+ *   CGI 프로그램은 stdout에 HTTP 응답 헤더 + 본문을 출력함.
+ *   Dup2(fd, STDOUT_FILENO)로 stdout을 클라이언트 소켓으로 교체하면
+ *   CGI가 printf()로 출력하는 내용이 클라이언트에게 직접 전송됨.
+ *
+ * fork()가 필요한 이유:
+ *   execve()는 현재 프로세스의 코드를 통째로 CGI로 덮어씀.
+ *   fork() 없이 execve() 하면 Tiny 서버 자체가 사라짐.
+ *   자식만 CGI로 교체하고, 부모(Tiny)는 살아서 다음 요청을 처리함.
+ */
+void serve_dynamic(int fd, char *filename, char *cgiargs) {
+  char buf[MAXLINE];            // 헤더 문자열을 임시로 담는 버퍼
+  char *emptylist[] = { NULL }; // execve()의 argv 인자
+                                // CGI는 QUERY_STRING 환경변수로 인자를 받으므로
+                                // argv는 비어있어도 됨 (NULL로 끝나는 배열)
+
+  /* ---------------------------------------------------------------
+   * [1단계] 성공 상태 라인 + Server 헤더 전송
+   *
+   * Content-type, 본문 등 나머지는 CGI 프로그램이 직접 출력함
+   * (stdout이 클라이언트 소켓으로 교체된 뒤 CGI가 printf로 출력)
+   * --------------------------------------------------------------- */
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");       // 오타 주의: 숫자 0 (영문자 O 아님)
+  Rio_writen(fd, buf, strlen(buf));
+  sprintf(buf, "Server: Tiny Web Server\r\n");
+  Rio_writen(fd, buf, strlen(buf));
+
+  /* ---------------------------------------------------------------
+   * [2단계] fork()로 자식 프로세스 생성
+   *
+   * Fork() 반환값:
+   *   자식 프로세스: 0    → if문 진입 → CGI 실행
+   *   부모 프로세스: 양수  → if문 건너뜀 → Wait()으로 대기
+   * --------------------------------------------------------------- */
+  if(Fork() == 0) {
+
+    /* ---------------------------------------------------------------
+     * [3단계] 자식 프로세스: CGI 프로그램 실행
+     * --------------------------------------------------------------- */
+
+    // setenv(): QUERY_STRING 환경변수에 cgiargs 값을 설정
+    // CGI 프로그램은 getenv("QUERY_STRING")으로 인자를 읽음
+    // 예: cgiargs="15000&213" → QUERY_STRING="15000&213"
+    // 세 번째 인자 1: 이미 존재하면 덮어씀
+    setenv("QUERY_STRING", cgiargs, 1);
+
+    // Dup2(fd, STDOUT_FILENO): stdout(fd 1)을 클라이언트 소켓 fd로 교체
+    // 이후 CGI 프로그램이 printf()로 출력하면 클라이언트에게 전송됨
+    //
+    // 교체 전: fd 1 = 터미널(stdout)
+    // 교체 후: fd 1 = 클라이언트 소켓
+    Dup2(fd, STDOUT_FILENO);
+
+    // Execve(): 현재 자식 프로세스를 CGI 프로그램으로 통째로 교체해서 실행
+    // - filename: CGI 프로그램 경로 ("./cgi-bin/adder")
+    // - emptylist: argv (빈 배열, CGI는 환경변수로 인자를 받음)
+    // - environ: 현재 환경변수 목록 (방금 설정한 QUERY_STRING 포함)
+    // Execve가 성공하면 이 줄 이후 코드는 실행되지 않음
+    Execve(filename, emptylist, environ);
+  }
+
+  /* ---------------------------------------------------------------
+   * [4단계] 부모 프로세스: 자식 종료 대기
+   *
+   * Wait(NULL): 자식 프로세스가 종료될 때까지 블로킹
+   * NULL: 자식의 종료 상태값이 필요 없으므로 NULL 전달
+   * 기다리지 않으면 자식이 좀비 프로세스(zombie)가 됨
+   * 좀비 프로세스: 종료됐지만 프로세스 테이블에서 제거되지 않은 프로세스
+   * --------------------------------------------------------------- */
+  Wait(NULL);
+}
