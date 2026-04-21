@@ -280,3 +280,186 @@ void read_requesthdrs(rio_t *rp) {
   }
   return;
 }
+
+/*
+ * parse_uri - URI를 분석해서 파일 경로(filename)와 CGI 인자(cgiargs)를 추출하는 함수
+ *
+ * 매개변수:
+ *   uri      : 클라이언트가 요청한 URI (예: "/index.html", "/cgi-bin/adder?1&2")
+ *   filename : 추출한 실제 파일 경로를 저장할 버퍼 (호출자가 선언한 배열)
+ *   cgiargs  : 추출한 CGI 인자를 저장할 버퍼 (호출자가 선언한 배열)
+ *
+ * 반환값:
+ *   1 = 정적 콘텐츠 ("cgi-bin" 없음)
+ *   0 = 동적 콘텐츠 ("cgi-bin" 있음)
+ *
+ * URI 변환 예시:
+ *   정적: "/index.html"          → filename="./index.html",    cgiargs=""
+ *   정적: "/"                    → filename="./home.html",     cgiargs=""
+ *   동적: "/cgi-bin/adder?1&2"   → filename="./cgi-bin/adder", cgiargs="1&2"
+ *   동적: "/cgi-bin/adder"       → filename="./cgi-bin/adder", cgiargs=""
+ */
+int parse_uri(char *uri, char *filename, char *cgiargs) {
+  char *ptr; // URI 안에서 '?'의 위치를 가리키는 포인터
+
+  /* ---------------------------------------------------------------
+   * [정적 콘텐츠] URI에 "cgi-bin"이 없는 경우
+   *
+   * strstr(uri, "cgi-bin"): uri 안에서 "cgi-bin" 문자열을 탐색
+   *   - 발견되면 해당 위치의 포인터 반환 (true)
+   *   - 없으면 NULL 반환 (false)
+   * !strstr(...) == true → "cgi-bin" 없음 → 정적 콘텐츠
+   * --------------------------------------------------------------- */
+  if(!strstr(uri, "cgi-bin")) {
+    // 정적 콘텐츠는 CGI 인자가 없으므로 빈 문자열로 초기화
+    strcpy(cgiargs, "");
+
+    // filename = "." + uri
+    // strcpy로 "."을 먼저 복사한 뒤, strcat으로 uri를 이어붙임
+    // 예: uri="/index.html" → filename="./index.html"
+    strcpy(filename, ".");
+    strcat(filename, uri);  // ※ cgiargs가 아닌 filename에 붙여야 함
+
+    // uri의 마지막 문자가 '/'이면 디렉토리 요청
+    // 기본 페이지(home.html)로 연결
+    // 예: uri="/" → filename="./" + "home.html" = "./home.html"
+    if(uri[strlen(uri) - 1] == '/')
+      strcat(filename, "home.html");
+
+    return 1; // 정적 콘텐츠임을 doit()에 알림
+  }
+
+  /* ---------------------------------------------------------------
+   * [동적 콘텐츠] URI에 "cgi-bin"이 있는 경우
+   *
+   * URI 구조: "/cgi-bin/adder?15000&213"
+   *                           ↑
+   *                     '?' 이전 = CGI 프로그램 경로
+   *                     '?' 이후 = CGI에 넘길 인자
+   * --------------------------------------------------------------- */
+  else {
+    // index(uri, '?'): uri에서 '?' 문자의 위치를 찾아 포인터 반환
+    // '?'가 없으면 NULL 반환
+    ptr = index(uri, '?');
+
+    if(ptr) {
+      // ptr+1: '?' 바로 다음 문자부터 끝까지 = CGI 인자
+      // 예: "/cgi-bin/adder?15000&213" → cgiargs="15000&213"
+      strcpy(cgiargs, ptr + 1);
+
+      // *ptr = '\0': '?' 위치를 문자열 종료 문자로 덮어써서 uri를 잘라냄
+      // 예: "/cgi-bin/adder?15000&213" → "/cgi-bin/adder\0"
+      // 이후 strcat(filename, uri)에서 '?' 이전 경로만 붙음
+      *ptr = '\0';
+    }
+    else
+      // '?'가 없으면 CGI 인자 없음
+      // 예: "/cgi-bin/adder" → cgiargs=""
+      strcpy(cgiargs, "");
+
+    // filename = "." + uri ('?' 이후가 잘린 상태)
+    // 예: uri="/cgi-bin/adder" → filename="./cgi-bin/adder"
+    strcpy(filename, ".");
+    strcat(filename, uri);
+
+    return 0; // 동적 콘텐츠임을 doit()에 알림
+  }
+}
+
+/*
+ * serve_static - 정적 파일을 읽어서 클라이언트에게 HTTP 응답으로 전송하는 함수
+ *
+ * 매개변수:
+ *   fd       : 클라이언트와 연결된 소켓 fd
+ *   filename : 전송할 파일 경로 (예: "./index.html")
+ *   filesize : 전송할 파일 크기 (bytes), doit()에서 stat()으로 구해서 넘겨줌
+ *
+ * 동작 2단계:
+ *   [1단계] HTTP 응답 헤더를 buf에 만들어서 전송
+ *   [2단계] 파일을 메모리에 매핑(mmap)한 뒤 그대로 전송
+ *
+ * 클라이언트가 받는 최종 응답:
+ *   HTTP/1.0 200 OK\r\n
+ *   Server: Tiny Web Server\r\n
+ *   Connection: close\r\n
+ *   Content-length: 1234\r\n
+ *   Content-type: text/html\r\n
+ *   \r\n
+ *   (파일 내용)
+ */
+void serve_static(int fd, char *filename, int filesize)
+{
+    int srcfd;                          // 파일을 열었을 때 반환되는 파일 디스크립터
+    char *srcp;                         // mmap()이 반환하는 포인터
+                                        // 파일 내용이 매핑된 메모리 주소를 가리킴
+    char filetype[MAXLINE];             // get_filetype()이 채워주는 MIME 타입 문자열
+                                        // 예: "text/html", "image/png"
+    char buf[MAXBUF];                   // HTTP 응답 헤더 전체를 누적해서 담는 버퍼
+
+    /* ---------------------------------------------------------------
+     * [1단계] HTTP 응답 헤더 전송
+     *
+     * get_filetype(): 파일 확장자를 보고 MIME 타입을 결정
+     *   .html → "text/html"
+     *   .png  → "image/png"
+     *   기타  → "text/plain"
+     *
+     * sprintf로 헤더를 buf에 한 줄씩 누적한 뒤 한 번에 전송
+     * 마지막 \r\n\r\n: Content-type 헤더 뒤 빈 줄로 헤더 블록 종료
+     * --------------------------------------------------------------- */
+
+    // filename의 확장자를 보고 MIME 타입을 filetype에 저장
+    // 예: "./index.html" → filetype = "text/html"
+    get_filetype(filename, filetype);
+
+    // 응답 헤더를 buf에 누적
+    sprintf(buf, "HTTP/1.0 200 OK\r\n");                          // 상태 라인: 성공
+    sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);           // 서버 이름
+    sprintf(buf, "%sConnection: close\r\n", buf);                 // 응답 후 연결 종료
+    sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);      // 파일 크기 (bytes)
+    sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);    // MIME 타입 + 헤더 종료
+
+    // 완성된 헤더를 클라이언트에게 전송
+    Rio_writen(fd, buf, strlen(buf));
+
+    // 전송한 헤더를 서버 터미널에 출력 (디버깅용)
+    printf("Response headers:\n");
+    printf("%s", buf);
+
+    /* ---------------------------------------------------------------
+     * [2단계] 파일 본문 전송
+     *
+     * open() → mmap() → close() → Rio_writen() → munmap() 순서
+     *
+     * mmap()을 쓰는 이유:
+     *   파일을 read()로 읽으면 커널 버퍼 → 사용자 버퍼 → 소켓 버퍼로
+     *   2번 복사가 일어남. mmap()은 파일을 메모리에 직접 매핑해서
+     *   커널 버퍼 → 소켓 버퍼로 1번만 복사하므로 더 효율적임
+     * --------------------------------------------------------------- */
+
+    // 파일을 읽기 전용(O_RDONLY)으로 열어서 srcfd 획득
+    srcfd = Open(filename, O_RDONLY, 0);
+
+    // mmap(): 파일을 가상 메모리 공간에 매핑하고 시작 주소를 srcp에 저장
+    // 인자 설명:
+    //   0            : 커널이 매핑 주소를 자동으로 선택
+    //   filesize     : 매핑할 크기 (파일 전체)
+    //   PROT_READ    : 읽기 전용으로 매핑
+    //   MAP_PRIVATE  : 이 프로세스만 사용하는 private 매핑 (쓰기 시 복사본 생성)
+    //   srcfd        : 매핑할 파일의 fd
+    //   0            : 파일의 시작(offset 0)부터 매핑
+    srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+
+    // 파일 fd는 mmap 이후 더 이상 필요 없으므로 즉시 닫음
+    // mmap으로 이미 메모리에 매핑됐기 때문에 fd를 닫아도 데이터는 유지됨
+    Close(srcfd);
+
+    // 매핑된 메모리(srcp)의 내용을 클라이언트 fd에 filesize 바이트 전송
+    // 브라우저는 이 데이터를 받아서 렌더링함
+    Rio_writen(fd, srcp, filesize);
+
+    // 사용이 끝난 메모리 매핑 해제
+    // 해제하지 않으면 프로세스가 살아있는 동안 메모리를 계속 점유함
+    Munmap(srcp, filesize);
+}
+
