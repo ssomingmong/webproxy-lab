@@ -241,3 +241,42 @@ void clienterror(int fd, char *cause, char *errnum,
      * --------------------------------------------------------------- */
     Rio_writen(fd, body, strlen(body));
 }
+
+/*
+ * read_requesthdrs - HTTP 요청 헤더를 읽고 버리는 함수
+ *
+ * 매개변수:
+ *   rp : rio 버퍼 구조체 포인터 (이미 doit에서 Rio_readinitb로 초기화된 상태)
+ *
+ * 동작:
+ *   HTTP 요청에서 요청 라인 다음에 오는 헤더들을 한 줄씩 읽는다.
+ *   빈 줄("\r\n")이 나오면 헤더가 끝난 것이므로 루프를 종료한다.
+ *   Tiny는 헤더 내용을 사용하지 않지만, 읽지 않으면 소켓 버퍼에
+ *   데이터가 남아 이후 통신에 문제가 생기기 때문에 반드시 읽어야 한다.
+ *
+ * HTTP 요청 구조:
+ *   GET /index.html HTTP/1.0\r\n      ← 요청 라인 (doit에서 이미 읽음)
+ *   Host: localhost:8080\r\n          ┐
+ *   User-Agent: Mozilla/5.0\r\n       │ 이 함수가 읽고 버리는 영역
+ *   Accept: text/html\r\n             ┘
+ *   \r\n                              ← 빈 줄: 헤더 끝 신호 → 루프 종료
+ */
+void read_requesthdrs(rio_t *rp) {
+  char buf[MAXLINE]; // 헤더 한 줄을 읽어서 임시로 저장하는 버퍼
+
+  // 헤더 첫 번째 줄을 읽어서 buf에 저장
+  // doit에서 요청 라인은 이미 읽었으므로 여기서는 그 다음 줄부터 읽힘
+  Rio_readlineb(rp, buf, MAXLINE);
+
+  // strcmp(buf, "\r\n") != 0 이면 아직 헤더가 끝나지 않은 것
+  // 빈 줄("\r\n")이 오면 strcmp가 0을 반환 → 루프 종료
+  while(strcmp(buf, "\r\n")) {
+    // 다음 헤더 줄을 읽어서 buf에 덮어씀 (이전 줄은 버려짐)
+    Rio_readlineb(rp, buf, MAXLINE);
+
+    // 읽은 헤더를 서버 터미널에 출력 (디버깅용)
+    // 실제로 이 값을 사용하지는 않음
+    printf("%s", buf);
+  }
+  return;
+}
