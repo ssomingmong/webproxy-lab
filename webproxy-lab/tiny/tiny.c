@@ -463,3 +463,40 @@ void serve_static(int fd, char *filename, int filesize)
     Munmap(srcp, filesize);
 }
 
+/*
+ * get_filetype - 파일 확장자를 보고 MIME 타입을 결정하는 함수
+ *
+ * 매개변수:
+ *   filename : 파일 경로 (예: "./index.html")
+ *   filetype : MIME 타입을 저장할 버퍼 (호출자가 선언한 배열)
+ *              이 함수가 결과를 채워줌
+ *
+ * MIME 타입이란?
+ *   브라우저에게 "이 파일이 어떤 종류인지" 알려주는 문자열.
+ *   Content-type 헤더에 담겨 전송되며, 브라우저는 이걸 보고
+ *   HTML이면 렌더링, 이미지면 표시, 그 외엔 텍스트로 표시한다.
+ *
+ * 확장자 → MIME 타입 매핑:
+ *   .html → text/html
+ *   .gif  → image/gif
+ *   .png  → image/png
+ *   .jpg  → image/jpeg
+ *   그 외 → text/plain
+ */
+void get_filetype(char *filename, char *filetype)
+{
+    // strstr(filename, ".html"): filename 안에 ".html" 문자열이 있는지 탐색
+    // 있으면 해당 위치 포인터 반환(true), 없으면 NULL(false)
+    if(strstr(filename, ".html"))
+        strcpy(filetype, "text/html");
+    else if(strstr(filename, ".gif"))
+        strcpy(filetype, "image/gif");
+    else if(strstr(filename, ".png"))
+        strcpy(filetype, "image/png");
+    else if(strstr(filename, ".jpg"))
+        strcpy(filetype, "image/jpeg");
+    else
+        // 알 수 없는 확장자는 일반 텍스트로 처리
+        strcpy(filetype, "text/plain");
+}
+
