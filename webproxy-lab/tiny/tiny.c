@@ -131,4 +131,113 @@ void doit(int fd) {
   }
 }
 
+/*
+ * clienterror - 클라이언트에게 HTTP 에러 응답을 전송하는 함수
+ *
+ * 매개변수:
+ *   fd       : 클라이언트와 연결된 소켓 fd (이 fd로 응답을 전송)
+ *   cause    : 에러의 원인 (예: 요청한 파일명, 지원하지 않는 메서드명)
+ *   errnum   : HTTP 상태 코드 문자열 (예: "404", "403", "501")
+ *   shortmsg : 상태 코드에 대한 짧은 설명 (예: "Not Found", "Forbidden")
+ *   longmsg  : 에러에 대한 더 자세한 설명 (예: "Tiny couldn't find this file")
+ *
+ * 동작 방식:
+ *   1. HTML로 된 에러 페이지(body)를 문자열로 만든다
+ *   2. HTTP 응답 헤더를 한 줄씩 전송한다
+ *   3. 만들어둔 HTML body를 전송한다
+ *
+ * 호출 예시 (doit에서):
+ *   clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file");
+ *
+ *   → 클라이언트 브라우저에 아래와 같은 HTTP 응답이 전달됨:
+ *
+ *   HTTP/1.0 404 Not found\r\n
+ *   Content-type: text/html\r\n
+ *   Content-length: 123\r\n
+ *   \r\n
+ *   <html><title>Tiny Error</title>
+ *   <body bgcolor="ffffff">
+ *   404: Not found
+ *   <p>Tiny couldn't find this file: ./index.html
+ *   <hr><em>The Tiny Web Server</em>
+ */
+void clienterror(int fd, char *cause, char *errnum,
+                 char *shortmsg, char *longmsg)
+{
+    char buf[MAXLINE]; // HTTP 헤더 한 줄을 임시로 담는 버퍼
+                       // sprintf로 한 줄 만든 뒤 Rio_writen으로 바로 전송하고 재사용함
+    char body[MAXBUF]; // HTML 응답 본문 전체를 누적해서 담는 버퍼
+                       // MAXBUF = 8192 bytes (csapp.h에 정의됨)
 
+    /* ---------------------------------------------------------------
+     * [1단계] HTML 응답 본문(body) 만들기
+     *
+     * sprintf(body, "%s...", body, ...) 패턴을 반복해서
+     * body 문자열 뒤에 HTML을 계속 이어붙이는 방식
+     *
+     * 주의: sprintf(body, "...", body)는 입력과 출력이 같은 버퍼라서
+     *       원래는 undefined behavior이지만,
+     *       csapp 교재 2019 업데이트에서 이 방식으로 수정됨
+     *       (이전엔 strcat을 썼지만 aliasing 문제 때문에 변경)
+     * --------------------------------------------------------------- */
+
+    // HTML 문서 시작 + 탭 제목 설정
+    // 결과: "<html><title>Tiny Error</title>"
+    sprintf(body, "<html><title>Tiny Error</title>");
+
+    // body 배경색 흰색(ffffff)으로 설정
+    // 결과: "<html>...<body bgcolor="ffffff">\r\n"
+    sprintf(body, "%s<body bgcolor=""ffffff"">\r\n", body);
+
+    // 에러 코드와 짧은 설명 출력
+    // 예: "404: Not found\r\n"
+    sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
+
+    // 자세한 설명 + 원인(파일명 or 메서드명) 출력
+    // 예: "<p>Tiny couldn't find this file: ./index.html\r\n"
+    sprintf(body, "%s<p>%s: %s\r\n", body, longmsg, cause);
+
+    // 하단에 수평선 + 서버 이름 표시
+    // 예: "<hr><em>The Tiny Web Server</em>\r\n"
+    sprintf(body, "%s<hr><em>The Tiny Web Server</em>\r\n", body);
+
+    /* ---------------------------------------------------------------
+     * [2단계] HTTP 응답 헤더 전송
+     *
+     * HTTP 응답 형식:
+     *   상태 라인\r\n
+     *   헤더1\r\n
+     *   헤더2\r\n
+     *   \r\n          ← 빈 줄: 헤더 끝을 나타냄
+     *   본문
+     *
+     * buf에 한 줄씩 만들어서 바로 전송
+     * Rio_writen(fd, buf, strlen(buf)): buf의 내용을 fd에 strlen(buf) 바이트 전송
+     * --------------------------------------------------------------- */
+
+    // 상태 라인 전송: "HTTP/1.0 404 Not found\r\n"
+    // HTTP 버전 1.0 고정 (Tiny는 1.0만 지원)
+    sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
+    Rio_writen(fd, buf, strlen(buf));
+
+    // Content-type 헤더 전송: "Content-type: text/html\r\n"
+    // 브라우저에게 응답 본문이 HTML임을 알려줌
+    sprintf(buf, "Content-type: text/html\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+
+    // Content-length 헤더 전송 + 헤더 종료 빈 줄
+    // "Content-length: 123\r\n\r\n"
+    // strlen(body): 실제 HTML body의 바이트 수
+    // (int) 캐스팅: strlen은 size_t(unsigned) 반환 → %d와 타입 맞추기 위해
+    // \r\n\r\n: 마지막 헤더 뒤 빈 줄로 헤더 블록 종료 (이 뒤부터 본문)
+    sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
+    Rio_writen(fd, buf, strlen(buf));
+
+    /* ---------------------------------------------------------------
+     * [3단계] HTTP 응답 본문(HTML) 전송
+     *
+     * 위에서 만들어둔 body 문자열 전체를 fd에 전송
+     * 클라이언트(브라우저)는 이 HTML을 받아서 에러 페이지를 렌더링함
+     * --------------------------------------------------------------- */
+    Rio_writen(fd, body, strlen(body));
+}
